@@ -1,0 +1,8 @@
+chainlit
+openai
+chromadb
+sentence-transformers
+requests
+beautifulsoup4
+python-docx
+python-dotenv
