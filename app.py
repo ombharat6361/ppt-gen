@@ -4,6 +4,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from retriever import load_collection, retrieve_balanced, retrieve
+from pptx_generator import generate_pptx
 
 load_dotenv()
 
@@ -51,7 +52,9 @@ async def start():
             content=(
                 "Index loaded successfully. Ask me anything about the documents in **Sources/**.\n\n"
                 "> Every answer is grounded in your indexed sources only — "
-                "I will tell you explicitly if something isn't covered."
+                "I will tell you explicitly if something isn't covered.\n\n"
+                "**Tip:** Start your message with `/pptx` to generate a PowerPoint presentation "
+                "on any topic covered by the sources."
             )
         ).send()
     except Exception as e:
@@ -76,14 +79,17 @@ async def main(message: cl.Message):
 
     history: list[dict] = cl.user_session.get("history")
 
-    # Retrieve relevant chunks — 2 per category so no source is crowded out
-    chunks = retrieve(
-        message.content,
-        collection,
-        # categories=["Articles", "Case Studies", "Our Solutions"],
-        # per_category=3,
-        top_k=10
-    )
+    is_pptx = message.content.strip().lower().startswith("/pptx")
+    query = message.content.strip()
+    if is_pptx:
+        query = query[5:].strip()
+        if not query:
+            await cl.Message(
+                content="Please provide a topic after `/pptx`. Example: `/pptx AI in banking`"
+            ).send()
+            return
+
+    chunks = retrieve(query, collection, top_k=10)
 
     if not chunks:
         await cl.Message(
@@ -93,21 +99,34 @@ async def main(message: cl.Message):
 
     context = build_context(chunks)
 
+    if is_pptx:
+        status_msg = cl.Message(content="Generating presentation — this may take a moment...")
+        await status_msg.send()
+
+        try:
+            out_path = await cl.make_async(generate_pptx)(query, context)
+            elements = [cl.File(name=out_path.name, path=str(out_path), display="inline")]
+            await cl.Message(
+                content=f"Here's your presentation on **{query}**.",
+                elements=elements,
+            ).send()
+        except Exception as e:
+            await cl.Message(content=f"Failed to generate presentation: `{e}`").send()
+        return
+
     user_prompt = (
         f"Sources:\n\n{context}\n\n"
         f"---\n\n"
-        f"Question: {message.content}\n\n"
+        f"Question: {query}\n\n"
         f"Answer using only the sources above. Cite each claim as [Source N]."
     )
 
-    # Build messages: system + history + current turn
     messages = (
         [{"role": "system", "content": SYSTEM_PROMPT}]
         + history
         + [{"role": "user", "content": user_prompt}]
     )
 
-    # Stream the response
     response_msg = cl.Message(content="")
     await response_msg.send()
 
@@ -125,7 +144,6 @@ async def main(message: cl.Message):
 
     await response_msg.update()
 
-    # Append this turn to history (store plain question, not the full source-stuffed prompt)
-    history.append({"role": "user", "content": message.content})
+    history.append({"role": "user", "content": query})
     history.append({"role": "assistant", "content": full_response})
     cl.user_session.set("history", history)

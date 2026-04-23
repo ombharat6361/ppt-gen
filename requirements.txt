@@ -5,4 +5,5 @@ sentence-transformers
 requests
 beautifulsoup4
 python-docx
+python-pptx
 python-dotenv

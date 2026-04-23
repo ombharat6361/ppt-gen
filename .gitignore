@@ -9,3 +9,9 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# ChromaDB index (regenerate with python indexer.py)
+knowledge_base/
+
+# Generated presentations
+output/
