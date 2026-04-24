@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(test -d 'C:\\\\Users\\\\ombha\\\\OneDrive\\\\Desktop\\\\Code\\\\LEXI\\\\.venv\\\\Lib\\\\site-packages$pkg')",
+      "Bash(grep \"\\\\.dist-info$\")",
+      "Bash(sed 's/-[0-9].*//')",
+      "Bash(.venv/Scripts/python.exe -c \"import openai; print\\(openai.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import pydantic; print\\(pydantic.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe *)"
     ]
   }
 }

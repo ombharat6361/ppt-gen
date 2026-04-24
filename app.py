@@ -1,14 +1,16 @@
 import os
 import chainlit as cl
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-from retriever import load_collection, retrieve_balanced, retrieve
+from retriever import load_collection, retrieve
 from pptx_generator import generate_pptx
+from tools import discover_categories, build_tools
+from agent import run_agent
 
 load_dotenv()
 
-CLIENT = OpenAI(
+CLIENT = AsyncOpenAI(
     api_key=os.environ.get("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1",
 )
@@ -46,11 +48,19 @@ def build_context(chunks: list[dict]) -> str:
 async def start():
     try:
         collection = load_collection()
+        categories = discover_categories()
+        tools, name_map = build_tools(categories)
+
         cl.user_session.set("collection", collection)
+        cl.user_session.set("tools", tools)
+        cl.user_session.set("name_map", name_map)
         cl.user_session.set("history", [])
+
+        category_list = ", ".join(f"**{c}**" for c in categories)
         await cl.Message(
             content=(
                 "Index loaded successfully. Ask me anything about the documents in **Sources/**.\n\n"
+                f"> I have access to these source categories: {category_list}\n\n"
                 "> Every answer is grounded in your indexed sources only — "
                 "I will tell you explicitly if something isn't covered.\n\n"
                 "**Tip:** Start your message with `/pptx` to generate a PowerPoint presentation "
@@ -79,27 +89,24 @@ async def main(message: cl.Message):
 
     history: list[dict] = cl.user_session.get("history")
 
+    # --- /pptx command (non-agentic, uses flat retrieval) ---
     is_pptx = message.content.strip().lower().startswith("/pptx")
-    query = message.content.strip()
     if is_pptx:
-        query = query[5:].strip()
+        query = message.content.strip()[5:].strip()
         if not query:
             await cl.Message(
                 content="Please provide a topic after `/pptx`. Example: `/pptx AI in banking`"
             ).send()
             return
 
-    chunks = retrieve(query, collection, top_k=10)
+        chunks = retrieve(query, collection, top_k=10)
+        if not chunks:
+            await cl.Message(
+                content="No relevant sources found for your query. Try rephrasing or check that the index is up to date."
+            ).send()
+            return
 
-    if not chunks:
-        await cl.Message(
-            content="No relevant sources found for your query. Try rephrasing or check that the index is up to date."
-        ).send()
-        return
-
-    context = build_context(chunks)
-
-    if is_pptx:
+        context = build_context(chunks)
         status_msg = cl.Message(content="Generating presentation — this may take a moment...")
         await status_msg.send()
 
@@ -114,33 +121,26 @@ async def main(message: cl.Message):
             await cl.Message(content=f"Failed to generate presentation: `{e}`").send()
         return
 
-    user_prompt = (
-        f"Sources:\n\n{context}\n\n"
-        f"---\n\n"
-        f"Question: {query}\n\n"
-        f"Answer using only the sources above. Cite each claim as [Source N]."
-    )
-
-    messages = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + history
-        + [{"role": "user", "content": user_prompt}]
-    )
+    # --- Agentic query path ---
+    query = message.content.strip()
+    tools = cl.user_session.get("tools")
+    name_map = cl.user_session.get("name_map")
 
     response_msg = cl.Message(content="")
     await response_msg.send()
 
-    full_response = ""
-    stream = CLIENT.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        max_tokens=1024,
-        messages=messages,
-        stream=True,
+    async def stream_token(token: str):
+        await response_msg.stream_token(token)
+
+    full_response = await run_agent(
+        client=CLIENT,
+        user_query=query,
+        collection=collection,
+        history=history,
+        tools=tools,
+        name_map=name_map,
+        stream_callback=stream_token,
     )
-    for chunk in stream:
-        text = chunk.choices[0].delta.content or ""
-        full_response += text
-        await response_msg.stream_token(text)
 
     await response_msg.update()
 

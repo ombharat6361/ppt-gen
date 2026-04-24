@@ -69,3 +69,28 @@ def retrieve_balanced(
                 chunks.append({"text": doc, "metadata": meta, "distance": dist})
 
     return sorted(chunks, key=lambda c: c["distance"])
+
+
+def retrieve_by_category(
+    query: str, collection, category: str, top_k: int = 5
+) -> list[dict]:
+    """Retrieve chunks filtered to a single source category."""
+    results = collection.query(
+        query_texts=[query],
+        n_results=top_k,
+        where={"category": category},
+        include=["documents", "metadatas", "distances"],
+    )
+
+    if not results["documents"][0]:
+        return []
+
+    chunks = []
+    for doc, meta, dist in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        chunks.append({"text": doc, "metadata": meta, "distance": dist})
+
+    return chunks
