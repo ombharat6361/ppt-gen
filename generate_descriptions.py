@@ -16,6 +16,7 @@ from collections import defaultdict
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from config import MODEL_NAME
 from retriever import load_collection
 
 load_dotenv()
@@ -73,7 +74,7 @@ def build_sample(chunks: list[dict]) -> str:
 def summarize_category(category: str, sample: str) -> str:
     """Ask the LLM to produce a description for one category."""
     response = CLIENT.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MODEL_NAME,
         max_tokens=256,
         temperature=0.3,
         messages=[

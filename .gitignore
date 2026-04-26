@@ -15,3 +15,6 @@ knowledge_base/
 
 # Generated presentations
 output/
+
+# Agent logs
+logs/

@@ -1,14 +1,18 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 from datetime import date
 
+import graphviz
 from openai import OpenAI
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from dotenv import load_dotenv
+
+from config import MODEL_NAME
 
 load_dotenv()
 
@@ -20,8 +24,12 @@ CLIENT = OpenAI(
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 SLIDE_PLAN_PROMPT = """\
-You are a presentation architect. Given source excerpts and a user topic, \
-produce a JSON slide deck plan.
+You are a presentation storyteller. Given source excerpts and a user topic, \
+produce a JSON slide deck plan that reads like a coherent narrative.
+
+Each slide should advance the story — set up context, build on the previous \
+slide, and lead naturally into the next. Write in flowing prose, not stiff \
+bullet lists. Think of each slide as a paragraph in an essay.
 
 Return ONLY valid JSON (no markdown fences) with this structure:
 {
@@ -30,7 +38,17 @@ Return ONLY valid JSON (no markdown fences) with this structure:
   "slides": [
     {
       "heading": "Slide heading",
-      "bullets": ["Point 1 [Source N]", "Point 2 [Source N]"],
+      "body": "2-4 sentences of narrative text that tell this part of the story. Cite sources inline as [Source N]. The writing should flow naturally and connect ideas.",
+      "key_point": "One punchy takeaway line for emphasis (optional)",
+      "diagram": {
+        "nodes": [
+          {"id": "a", "label": "Step 1"},
+          {"id": "b", "label": "Step 2"}
+        ],
+        "edges": [
+          {"from": "a", "to": "b", "label": "leads to"}
+        ]
+      },
       "notes": "Optional speaker notes"
     }
   ],
@@ -41,9 +59,15 @@ Return ONLY valid JSON (no markdown fences) with this structure:
 
 Rules:
 - 4-8 content slides (not counting title and sources slides).
-- Each bullet must cite its source as [Source N].
-- Keep bullets concise (≤ 20 words each).
-- Group related information into thematic slides.
+- Write "body" as fluid narrative prose, NOT bullet points.
+- Build a logical arc: introduce the topic, develop key themes, conclude with implications or next steps.
+- Each slide's body should be 2-4 sentences that flow naturally together.
+- Cite sources inline as [Source N] within the narrative.
+- "key_point" is an optional one-liner to highlight per slide — use sparingly.
+- "diagram" is OPTIONAL. Include it only on 1-2 slides where a visual \
+flowchart genuinely helps (e.g. processes, architectures, decision trees). \
+Keep diagrams simple: 3-7 nodes, short labels (≤ 5 words per node). \
+Edge labels are optional. Do NOT force a diagram on every slide.
 - Do NOT invent facts. Use ONLY the provided sources.
 - If sources are insufficient, include a slide noting the gaps.
 - End with a sources list matching every [Source N] cited."""
@@ -67,7 +91,7 @@ def _plan_slides(topic: str, context: str) -> dict:
         },
     ]
     resp = CLIENT.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MODEL_NAME,
         max_tokens=2048,
         messages=messages,
         temperature=0.3,
@@ -133,6 +157,54 @@ def _build_title_slide(prs, plan):
     accent_bar.line.fill.background()
 
 
+def _render_diagram(diagram_data: dict) -> Path | None:
+    """Render a diagram dict (nodes + edges) to a PNG and return the path."""
+    try:
+        dot = graphviz.Digraph(format="png")
+        dot.attr(
+            rankdir="LR",
+            bgcolor="#0F172A",
+            pad="0.4",
+            nodesep="0.6",
+            ranksep="0.8",
+        )
+        dot.attr(
+            "node",
+            shape="roundedbox",
+            style="filled",
+            fillcolor="#1E293B",
+            fontcolor="#F1F5F9",
+            fontname="Segoe UI",
+            fontsize="11",
+            color="#38BDF8",
+            penwidth="1.5",
+        )
+        dot.attr(
+            "edge",
+            color="#38BDF8",
+            fontcolor="#94A3B8",
+            fontname="Segoe UI",
+            fontsize="9",
+            arrowsize="0.8",
+        )
+
+        for node in diagram_data.get("nodes", []):
+            dot.node(node["id"], node.get("label", node["id"]))
+
+        for edge in diagram_data.get("edges", []):
+            attrs = {}
+            if edge.get("label"):
+                attrs["label"] = edge["label"]
+            dot.edge(edge["from"], edge["to"], **attrs)
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        out_path = dot.render(tmp.name, cleanup=True)
+        return Path(out_path)
+    except Exception:
+        return None
+
+
 def _build_content_slide(prs, slide_data):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_slide_bg(slide, BRAND["bg"])
@@ -151,26 +223,66 @@ def _build_content_slide(prs, slide_data):
     accent_bar.fill.fore_color.rgb = BRAND["accent"]
     accent_bar.line.fill.background()
 
-    txBox = slide.shapes.add_textbox(
-        Inches(0.8), Inches(1.5), Inches(8.4), Inches(5.0),
-    )
-    tf = txBox.text_frame
-    tf.word_wrap = True
+    diagram_data = slide_data.get("diagram")
+    diagram_img = _render_diagram(diagram_data) if diagram_data else None
 
-    for i, bullet in enumerate(slide_data.get("bullets", [])):
-        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        p.space_after = Pt(10)
-        p.space_before = Pt(4)
+    has_diagram = diagram_img and diagram_img.exists()
+    text_width = Inches(4.5) if has_diagram else Inches(8.4)
 
-        marker = p.add_run()
-        marker.text = "▸  "
-        marker.font.size = Pt(14)
-        marker.font.color.rgb = BRAND["accent"]
+    body = slide_data.get("body", "")
+    bullets = slide_data.get("bullets", [])
 
-        run = p.add_run()
-        run.text = bullet
-        run.font.size = Pt(14)
-        run.font.color.rgb = BRAND["text"]
+    if body:
+        tf = _add_textbox(
+            slide,
+            Inches(0.8), Inches(1.5), text_width, Inches(3.5),
+            body, 14, BRAND["text"],
+        )
+        tf.paragraphs[0].space_after = Pt(12)
+        tf.paragraphs[0].line_spacing = Pt(22)
+
+        key_point = slide_data.get("key_point", "")
+        if key_point:
+            kp_box = slide.shapes.add_textbox(
+                Inches(0.8), Inches(4.3), text_width, Inches(0.6),
+            )
+            kp_tf = kp_box.text_frame
+            kp_tf.word_wrap = True
+            p = kp_tf.paragraphs[0]
+            marker = p.add_run()
+            marker.text = "▸  "
+            marker.font.size = Pt(13)
+            marker.font.color.rgb = BRAND["accent"]
+            run = p.add_run()
+            run.text = key_point
+            run.font.size = Pt(13)
+            run.font.color.rgb = BRAND["accent"]
+            run.font.bold = True
+    elif bullets:
+        txBox = slide.shapes.add_textbox(
+            Inches(0.8), Inches(1.5), text_width, Inches(5.0),
+        )
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        for i, bullet in enumerate(bullets):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.space_after = Pt(10)
+            p.space_before = Pt(4)
+            marker = p.add_run()
+            marker.text = "▸  "
+            marker.font.size = Pt(14)
+            marker.font.color.rgb = BRAND["accent"]
+            run = p.add_run()
+            run.text = bullet
+            run.font.size = Pt(14)
+            run.font.color.rgb = BRAND["text"]
+
+    if has_diagram:
+        slide.shapes.add_picture(
+            str(diagram_img),
+            Inches(5.5), Inches(1.3), Inches(4.2), Inches(3.5),
+        )
+        diagram_img.unlink(missing_ok=True)
 
     notes = slide_data.get("notes", "")
     if notes:

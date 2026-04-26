@@ -3,6 +3,7 @@ import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+from config import MAX_HISTORY_TURNS
 from retriever import load_collection, retrieve
 from pptx_generator import generate_pptx
 from tools import discover_categories, build_tools
@@ -146,4 +147,8 @@ async def main(message: cl.Message):
 
     history.append({"role": "user", "content": query})
     history.append({"role": "assistant", "content": full_response})
+    # Each turn = 2 messages (user + assistant). Keep the last N turns.
+    max_messages = MAX_HISTORY_TURNS * 2
+    if len(history) > max_messages:
+        history = history[-max_messages:]
     cl.user_session.set("history", history)

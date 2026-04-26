@@ -1,8 +1,24 @@
+import json
+import logging
+import re
+from datetime import datetime
+from pathlib import Path
+
 from openai import AsyncOpenAI
 
+from config import MODEL_NAME
 from tools import execute_tool_call
 
 MAX_TOOL_ROUNDS = 3
+
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+_log = logging.getLogger("lexi.agent")
+_log.setLevel(logging.INFO)
+_file_handler = logging.FileHandler(LOG_DIR / "agent.log", encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s"))
+_log.addHandler(_file_handler)
 
 SUPERVISOR_SYSTEM_PROMPT = """\
 You are LEXI, an agentic research assistant with access to multiple knowledge base tools. \
@@ -70,15 +86,21 @@ async def run_agent(
     stream_callback=None,
 ) -> str:
     """Run the agentic loop. Returns the final assistant response text."""
+    _log.info("=" * 60)
+    _log.info("QUERY: %s", user_query)
+
     messages = [
         {"role": "system", "content": SUPERVISOR_SYSTEM_PROMPT},
         *history,
         {"role": "user", "content": user_query},
     ]
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    tool_calls_log: list[dict] = []
+    context_log: list[dict] = []
+
+    for round_num in range(MAX_TOOL_ROUNDS):
         response = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=MODEL_NAME,
             max_tokens=1024,
             messages=messages,
             tools=tools,
@@ -93,6 +115,13 @@ async def run_agent(
         messages.append(_serialize_message(msg))
 
         for tc in msg.tool_calls:
+            _log.info("TOOL CALL [round %d]: %s(%s)", round_num + 1, tc.function.name, tc.function.arguments)
+            tool_calls_log.append({
+                "round": round_num + 1,
+                "function": tc.function.name,
+                "arguments": tc.function.arguments,
+            })
+
             result = execute_tool_call(
                 tc.function.name,
                 tc.function.arguments,
@@ -107,11 +136,29 @@ async def run_agent(
                 }
             )
 
+            try:
+                parsed = json.loads(result)
+                for r in parsed.get("results", []):
+                    context_log.append({
+                        "category": parsed.get("category", ""),
+                        "title": r.get("title", ""),
+                        "source_path": r.get("source_path", ""),
+                        "url": r.get("url", ""),
+                        "distance": r.get("distance", ""),
+                        "text_preview": r.get("text", "")[:150],
+                    })
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+    _log.info("CONTEXT FETCHED (%d chunks):", len(context_log))
+    for ctx in context_log:
+        _log.info("  [%s] %s — %s", ctx["category"], ctx["title"], ctx["source_path"])
+
     # Final streamed synthesis (no tools — forces text response)
     full_response = ""
     stream = await client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        max_tokens=1024,
+        model=MODEL_NAME,
+        max_tokens=4096,
         messages=messages,
         stream=True,
     )
@@ -121,5 +168,9 @@ async def run_agent(
         full_response += token
         if stream_callback:
             await stream_callback(token)
+
+    cited = sorted(set(re.findall(r"\[Source\s+(\d+)]", full_response)))
+    _log.info("SOURCES CITED: %s", ", ".join(f"[Source {n}]" for n in cited) if cited else "(none)")
+    _log.info("RESPONSE LENGTH: %d chars", len(full_response))
 
     return full_response
