@@ -9,3 +9,4 @@ python-pptx
 python-dotenv
 pdfplumber
 graphviz
+httpx
